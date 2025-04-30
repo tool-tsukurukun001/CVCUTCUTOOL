@@ -62,9 +62,13 @@ class App(tk.Tk):
         tk.Entry(frm, textvariable=self.out_dir, width=42).grid(row=7, column=1)
         tk.Button(frm, text='参照', command=self.browse_out).grid(row=7, column=2)
 
-        # 7. 実行ボタン
+        # 7. しきい値スライダー
+        self.threshold = tk.IntVar(value=80); tk.Scale(frm, from_=0, to=100, orient='horizontal', variable=self.threshold,
+                                                       label='しきい値 (ゆるい 0 〜 100 きびしい)', length=250).grid(row=8, column=0, columnspan=3, pady=5)
+
+        # 8. 実行ボタン
         tk.Button(frm, text='WAV 出力', bg='royalblue', fg='white', width=22,
-                  command=self.run).grid(row=8, column=0, columnspan=3, pady=15)
+                  command=self.run).grid(row=9, column=0, columnspan=3, pady=15)
 
         # ------- 右ペイン テーブル -------
         cols = ('No', '台詞', '出力wav名')
