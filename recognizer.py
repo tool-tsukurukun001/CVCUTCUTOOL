@@ -7,7 +7,7 @@ def transcribe_chunks(chunks_dir: Path, model_size: str = "base"):
     model_size: "tiny", "base", "small" など
     → 戻り値: { "chunk_1.wav": "テキスト...", … }
     """
-    model = WhisperModel(model_size, device="cpu")
+    model = WhisperModel(model_size, device="cpu", compute_type="int8")
     results = {}
     for audio_file in sorted(chunks_dir.glob("chunk_*.wav")):
         print(f"[Transcribe] {audio_file.name} …")
@@ -25,9 +25,9 @@ def transcribe_full(wav_path: str, model_size: str = "base"):
          …
        ]
     """
-    model = WhisperModel(model_size, device="cpu")
+    model = WhisperModel(model_size, device="cpu", compute_type="int8")
     segments, _ = model.transcribe(wav_path)
     return [
-        {"start": seg.start, "end": seg.end, "text": seg.text.strip()}
-        for seg in segments
+        {"start": segment.start, "end": segment.end, "text": segment.text.strip()}
+        for segment in segments
     ]

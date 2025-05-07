@@ -141,6 +141,10 @@ class App(tk.Tk):
 
             # 1) Whisper で分割 & 認識
             segments = transcribe_full(str(wav))
+            # デバッグ: 認識結果を全て出力
+            print(f"[DEBUG] segments for {wav.name}")
+            for seg in segments:
+                print(f"  {seg['start']:.2f}-{seg['end']:.2f}: {seg['text']}")
 
             # 2) 音量フィルタ
             vol_th = self.volume_thresh.get()
@@ -156,32 +160,31 @@ class App(tk.Tk):
             matched_keys = {(m['start'], m['end']) for m in matches}
 
             count_dict = {}
-            # 正常マッチ
+            mis_count_dict = {}
+            # 正常マッチ・mis両方対応
             for m in matches:
                 num = int(m['script_number'])
-                count_dict[num] = count_dict.get(num, 0) + 1
-                ver = count_dict[num]
-                fname = f"{self.prefix.get()}{num:03d}_{ver:02d}.wav"
+                if m.get('is_mis'):
+                    # misの場合
+                    mis_count_dict[num] = mis_count_dict.get(num, 0) + 1
+                    ver = count_dict.get(num, 0) + 1
+                    mis_ver = mis_count_dict[num]
+                    fname = f"{self.prefix.get()}{num:03d}_{ver:02d}_mis{mis_ver:02d}.wav"
+                else:
+                    count_dict[num] = count_dict.get(num, 0) + 1
+                    ver = count_dict[num]
+                    fname = f"{self.prefix.get()}{num:03d}_{ver:02d}.wav"
+                # 台詞欄の表示内容を分岐
+                if not m.get('is_mis'):
+                    # 高い類似度でマッチした場合はリストの台詞文言を表示
+                    text_disp = scripts[[s['no'] for s in scripts].index(f"{num:03d}")]['text'].rstrip('。')
+                else:
+                    # 途中で切れている・低い類似度の場合は音声認識結果をそのまま表示
+                    text_disp = m['text'].rstrip('。')
                 clip = audio[int(m['start']*1000): int(m['end']*1000)]
                 clip.export(wav_sub / fname, format='wav')
-                self.table.insert('', tk.END, values=(num, m['text'], fname))
-
-            # mis 出力
-            for seg in segments:
-                key = (seg['start'], seg['end'])
-                if key in matched_keys:
-                    continue
-                # best_script は文字列を返すので int に変換
-                num_str = self.best_script(seg['text'], scripts)
-                num = int(num_str)
-                count_dict[num] = count_dict.get(num, 0) + 1
-                ver = count_dict[num]
-                fname = f"{self.prefix.get()}{num:03d}_{ver:02d}_mis.wav"
-                clip = audio[int(seg['start']*1000): int(seg['end']*1000)]
-                clip.export(wav_sub / fname, format='wav')
-                # 表示は元の番号文字列＋"(mis)" に
-                self.table.insert('', tk.END,
-                                  values=(f"{num_str}(mis)", seg['text'], fname))
+                no_disp = f"{num}(mis)" if m.get('is_mis') else num
+                self.table.insert('', tk.END, values=(no_disp, text_disp, fname))
 
         messagebox.showinfo('完了', 'WAV出力が完了しました')
 
