@@ -7,6 +7,7 @@ from matcher import match_segments
 from pydub import AudioSegment
 from fuzzywuzzy import fuzz
 import threading
+from splitter import split_audio
 
 
 class App(tk.Tk):
@@ -109,6 +110,14 @@ class App(tk.Tk):
         if not self.cv_path.get() or not self.wav_dir.get():
             messagebox.showerror('エラー', 'CVリストとwavフォルダを指定してください')
             return
+        # 進行中インジケーター
+        self.config(cursor='watch')
+        if not hasattr(self, 'progress_label'):
+            self.progress_label = tk.Label(self, text='処理中...', fg='red', font=('Arial', 16))
+            self.progress_label.pack(side=tk.TOP, pady=5)
+        else:
+            self.progress_label.config(text='処理中...')
+        self.update()
         threading.Thread(target=self.process, daemon=True).start()
 
     # mis 用の最良スクリプト推定
@@ -136,11 +145,30 @@ class App(tk.Tk):
             wav_sub = out_root / wav.stem
             wav_sub.mkdir(exist_ok=True)
 
-            # 全体音声読み込み
-            audio = AudioSegment.from_file(wav)
+            # 無音区間で分割（パラメータ調整）
+            chunk_segments = split_audio(
+                str(wav),
+                min_silence_len=700,   # 無音とみなす最小長さ（ms）
+                silence_thresh=-40,    # 無音判定の音量（dBFS）
+                keep_silence=400      # 前後に保持する無音長（ms）
+            )
+            segments = []
+            for idx, chunk in enumerate(chunk_segments, start=1):
+                # チャンクを一時ファイルとして保存
+                tmp_chunk_path = wav_sub / f"_tmp_chunk_{idx:03d}.wav"
+                chunk['audio'].export(tmp_chunk_path, format='wav')
+                # Whisperで認識
+                chunk_result = transcribe_full(str(tmp_chunk_path))
+                # 認識結果を格納（タイムスタンプはチャンクの相対値なので、絶対値に変換）
+                for seg in chunk_result:
+                    seg_abs = {
+                        'start': chunk['start'] + seg['start'],
+                        'end': chunk['start'] + seg['end'],
+                        'text': seg['text']
+                    }
+                    segments.append(seg_abs)
+                tmp_chunk_path.unlink()  # 一時ファイル削除
 
-            # 1) Whisper で分割 & 認識
-            segments = transcribe_full(str(wav))
             # デバッグ: 認識結果を全て出力
             print(f"[DEBUG] segments for {wav.name}")
             for seg in segments:
@@ -149,6 +177,7 @@ class App(tk.Tk):
             # 2) 音量フィルタ
             vol_th = self.volume_thresh.get()
             filtered = []
+            audio = AudioSegment.from_file(wav)
             for seg in segments:
                 clip = audio[int(seg['start']*1000): int(seg['end']*1000)]
                 if clip.dBFS >= vol_th:
@@ -163,30 +192,38 @@ class App(tk.Tk):
             mis_count_dict = {}
             # 正常マッチ・mis両方対応
             for m in matches:
-                num = int(m['script_number'])
-                if m.get('is_mis'):
-                    # misの場合
-                    mis_count_dict[num] = mis_count_dict.get(num, 0) + 1
-                    ver = count_dict.get(num, 0) + 1
-                    mis_ver = mis_count_dict[num]
-                    fname = f"{self.prefix.get()}{num:03d}_{ver:02d}_mis{mis_ver:02d}.wav"
+                if m.get('is_mis') and m['script_number'] == '000':
+                    # misファイル（日本語・英語以外）は000_00_misXX.wav
+                    fname = f"{self.prefix.get()}000_00_mis{m['mis_index']:02d}.wav"
+                    text_disp = m['text']
+                    no_disp = '000(mis)'
                 else:
-                    count_dict[num] = count_dict.get(num, 0) + 1
-                    ver = count_dict[num]
-                    fname = f"{self.prefix.get()}{num:03d}_{ver:02d}.wav"
-                # 台詞欄の表示内容を分岐
-                if not m.get('is_mis'):
-                    # 高い類似度でマッチした場合はリストの台詞文言を表示
-                    text_disp = scripts[[s['no'] for s in scripts].index(f"{num:03d}")]['text'].rstrip('。')
-                else:
-                    # 途中で切れている・低い類似度の場合は音声認識結果をそのまま表示
-                    text_disp = m['text'].rstrip('。')
+                    num = int(m['script_number'])
+                    if m.get('is_mis'):
+                        mis_count_dict[num] = mis_count_dict.get(num, 0) + 1
+                        ver = count_dict.get(num, 0) + 1
+                        mis_ver = mis_count_dict[num]
+                        fname = f"{self.prefix.get()}{num:03d}_{ver:02d}_mis{mis_ver:02d}.wav"
+                    else:
+                        count_dict[num] = count_dict.get(num, 0) + 1
+                        ver = count_dict[num]
+                        fname = f"{self.prefix.get()}{num:03d}_{ver:02d}.wav"
+                    # 台詞欄の表示内容を分岐
+                    if not m.get('is_mis'):
+                        text_disp = scripts[[s['no'] for s in scripts].index(f"{num:03d}")]['text'].rstrip('。')
+                    else:
+                        text_disp = m['text'].rstrip('。')
+                    no_disp = f"{num}(mis)" if m.get('is_mis') else num
                 clip = audio[int(m['start']*1000): int(m['end']*1000)]
                 clip.export(wav_sub / fname, format='wav')
-                no_disp = f"{num}(mis)" if m.get('is_mis') else num
                 self.table.insert('', tk.END, values=(no_disp, text_disp, fname))
 
         messagebox.showinfo('完了', 'WAV出力が完了しました')
+        # 進行中インジケーター解除
+        self.config(cursor='')
+        if hasattr(self, 'progress_label'):
+            self.progress_label.config(text='')
+        self.update()
 
 
 if __name__ == '__main__':
