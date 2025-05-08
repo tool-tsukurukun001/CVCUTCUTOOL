@@ -4,3 +4,7 @@ openpyxl
 whisper
 fuzzywuzzy
 PySimpleGUI
+faster-whisper
+python-Levenshtein
+sounddevice
+numpy
