@@ -91,11 +91,15 @@ class App(tk.Tk):
             label='音量しきい値 (dBFS)', length=250
         ).grid(row=9, column=0, columnspan=3, pady=5)
 
-        # WAV出力ボタン
+        # プレビュー（旧WAV出力）ボタン
         tk.Button(
-            frm, text='WAV 出力', bg='royalblue', fg='white', width=22,
-            command=self.run
+            frm, text='プレビュー', bg='royalblue', fg='white', width=22,
+            command=self.preview
         ).grid(row=10, column=0, columnspan=3, pady=15)
+
+        # WAV出力ボタン（プレビューの下に追加）
+        self.export_wav_button = tk.Button(frm, text='WAV出力', bg='green', fg='white', width=22, command=self.export_wav_files)
+        self.export_wav_button.grid(row=15, column=0, columnspan=3, pady=10)
 
         # --- ここから下にコントロールボタンを縦に配置 ---
         self.play_button = tk.Button(frm, text='再生', command=self.play_selected, width=22)
@@ -108,11 +112,11 @@ class App(tk.Tk):
         self.csv_button.grid(row=14, column=0, columnspan=3, pady=10)
 
         # ---------- 右ペイン：結果テーブル ----------
-        cols = ('No', '台詞', '出力wav名')
+        cols = ('No', '台詞', '出力wav名', '開始', '終了', '元WAV')
         self.table = ttk.Treeview(self, columns=cols, show='headings', height=28)
         for c in cols:
             self.table.heading(c, text=c)
-            self.table.column(c, width=260 if c == '台詞' else 140, anchor='w')
+            self.table.column(c, width=180 if c == '台詞' else 100, anchor='w')
         self.table.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         # テーブルの選択イベントをバインド
@@ -152,8 +156,8 @@ class App(tk.Tk):
         if p:
             self.out_dir.set(p)
 
-    # 実行トリガー
-    def run(self):
+    # プレビュートリガー
+    def preview(self):
         if not self.cv_path.get() or not self.wav_dir.get():
             messagebox.showerror('エラー', 'CVリストとwavフォルダを指定してください')
             return
@@ -165,48 +169,32 @@ class App(tk.Tk):
         else:
             self.progress_label.config(text='処理中...')
         self.update()
-        threading.Thread(target=self.process, daemon=True).start()
+        threading.Thread(target=self.process_preview, daemon=True).start()
 
-    # mis 用の最良スクリプト推定
-    def best_script(self, text, scripts):
-        return max(scripts, key=lambda s: fuzz.partial_ratio(text, s['text']))['no']
-
-    # メイン処理
-    def process(self):
+    # プレビュー用メイン処理（ファイルは出力しない）
+    def process_preview(self):
         self.table.delete(*self.table.get_children())
-
-        # スクリプト読み込み
         scripts = load_script_list(
             Path(self.cv_path.get()),
-        sheet_name=self.sheet.get(),
-        start_row=int(self.start_row.get() or 2),
-        no_col=self.no_col.get(),        # ← 追加
-        text_col=self.text_col.get()     # ← 追加
-    )
-
+            sheet_name=self.sheet.get(),
+            start_row=int(self.start_row.get() or 2),
+            no_col=self.no_col.get(),
+            text_col=self.text_col.get()
+        )
         wav_dir = Path(self.wav_dir.get())
-        out_root = Path(self.out_dir.get()) if self.out_dir.get() else Path.cwd() / 'output'
-        out_root.mkdir(exist_ok=True)
-
         for wav in wav_dir.glob('*.wav'):
-            wav_sub = out_root / wav.stem
-            wav_sub.mkdir(exist_ok=True)
-
-            # 無音区間で分割（パラメータ調整）
+            wav_name = wav.name
             chunk_segments = split_audio(
                 str(wav),
-                min_silence_len=700,   # 無音とみなす最小長さ（ms）
-                silence_thresh=-40,    # 無音判定の音量（dBFS）
-                keep_silence=400      # 前後に保持する無音長（ms）
+                min_silence_len=700,
+                silence_thresh=-40,
+                keep_silence=400
             )
             segments = []
             for idx, chunk in enumerate(chunk_segments, start=1):
-                # チャンクを一時ファイルとして保存
-                tmp_chunk_path = wav_sub / f"_tmp_chunk_{idx:03d}.wav"
+                tmp_chunk_path = wav.parent / f"_tmp_chunk_{idx:03d}.wav"
                 chunk['audio'].export(tmp_chunk_path, format='wav')
-                # Whisperで認識
                 chunk_result = transcribe_full(str(tmp_chunk_path))
-                # 認識結果を格納（タイムスタンプはチャンクの相対値なので、絶対値に変換）
                 for seg in chunk_result:
                     seg_abs = {
                         'start': chunk['start'] + seg['start'],
@@ -214,14 +202,10 @@ class App(tk.Tk):
                         'text': seg['text']
                     }
                     segments.append(seg_abs)
-                tmp_chunk_path.unlink()  # 一時ファイル削除
-
-            # デバッグ: 認識結果を全て出力
+                tmp_chunk_path.unlink()
             print(f"[DEBUG] segments for {wav.name}")
             for seg in segments:
                 print(f"  {seg['start']:.2f}-{seg['end']:.2f}: {seg['text']}")
-
-            # 2) 音量フィルタ
             vol_th = self.volume_thresh.get()
             filtered = []
             audio = AudioSegment.from_file(wav)
@@ -230,17 +214,11 @@ class App(tk.Tk):
                 if clip.dBFS >= vol_th:
                     filtered.append(seg)
             segments = filtered
-
-            # 3) スクリプト照合
             matches = match_segments(segments, scripts, threshold=self.threshold.get())
-            matched_keys = {(m['start'], m['end']) for m in matches}
-
             count_dict = {}
             mis_count_dict = {}
-            # 正常マッチ・mis両方対応
             for m in matches:
                 if m.get('is_mis') and m['script_number'] == '000':
-                    # misファイル（日本語・英語以外）は000_00_misXX.wav
                     fname = f"{self.prefix.get()}000_00_mis{m['mis_index']:02d}.wav"
                     text_disp = m['text']
                     no_disp = '000(mis)'
@@ -255,18 +233,14 @@ class App(tk.Tk):
                         count_dict[num] = count_dict.get(num, 0) + 1
                         ver = count_dict[num]
                         fname = f"{self.prefix.get()}{num:03d}_{ver:02d}.wav"
-                    # 台詞欄の表示内容を分岐
                     if not m.get('is_mis'):
                         text_disp = scripts[[s['no'] for s in scripts].index(f"{num:03d}")]['text'].rstrip('。')
                     else:
                         text_disp = m['text'].rstrip('。')
                     no_disp = f"{num}(mis)" if m.get('is_mis') else num
-                clip = audio[int(m['start']*1000): int(m['end']*1000)]
-                clip.export(wav_sub / fname, format='wav')
-                self.table.insert('', tk.END, values=(no_disp, text_disp, fname))
-
-        messagebox.showinfo('完了', 'WAV出力が完了しました')
-        # 進行中インジケーター解除
+                # 表に「No, 台詞, 仮ファイル名, 開始, 終了, 元WAV」を表示
+                self.table.insert('', tk.END, values=(no_disp, text_disp, fname, m['start'], m['end'], wav_name))
+        messagebox.showinfo('完了', 'プレビューが完了しました')
         self.config(cursor='')
         if hasattr(self, 'progress_label'):
             self.progress_label.config(text='')
@@ -277,27 +251,43 @@ class App(tk.Tk):
         if not selected_items:
             messagebox.showinfo('情報', '再生する行を選択してください')
             return
-            
         if self.is_playing:
             self.stop_playback()
-            
         item = selected_items[0]
         values = self.table.item(item)['values']
-        wav_name = values[2]
-        
-        # 出力ディレクトリから音声ファイルを探す
-        wav_path = None
-        for root, dirs, files in os.walk(self.out_dir.get()):
-            if wav_name in files:
-                wav_path = os.path.join(root, wav_name)
-                break
-                
-        if wav_path:
-            self.current_audio_path = wav_path
-            self.play_thread = threading.Thread(target=self._play_audio)
-            self.play_thread.start()
-        else:
-            messagebox.showerror('エラー', '音声ファイルが見つかりません')
+        fname = values[2]
+        start = float(values[3])
+        end = float(values[4])
+        wav_name = values[5]
+        wav_dir = Path(self.wav_dir.get())
+        wav_path = wav_dir / wav_name
+        if not wav_path.exists():
+            messagebox.showerror('エラー', f'元WAVファイルが見つかりません: {wav_name}')
+            return
+        self.current_audio_path = str(wav_path)
+        self.preview_start = start
+        self.preview_end = end
+        self.play_thread = threading.Thread(target=self._play_preview_audio)
+        self.play_thread.start()
+
+    def _play_preview_audio(self):
+        self.is_playing = True
+        try:
+            print(f"プレビュー再生: {self.current_audio_path} {self.preview_start}-{self.preview_end}")
+            audio = AudioSegment.from_file(self.current_audio_path)
+            preview = audio[int(self.preview_start*1000):int(self.preview_end*1000)]
+            samples = np.array(preview.get_array_of_samples())
+            if preview.channels == 2:
+                samples = samples.reshape((-1, 2))
+            max_val = float(2 ** (8 * preview.sample_width - 1))
+            samples = samples.astype(np.float32) / max_val
+            sd.play(samples, preview.frame_rate)
+            sd.wait()
+        except Exception as e:
+            print(f'プレビュー再生エラー: {e}')
+            messagebox.showerror('エラー', f'プレビュー再生中にエラーが発生しました：\n{str(e)}')
+        finally:
+            self.is_playing = False
 
     def play_continuous(self):
         selected_items = self.table.selection()
@@ -318,26 +308,27 @@ class App(tk.Tk):
         while self.continuous_play and current_index < len(self.table.get_children()):
             item = self.table.get_children()[current_index]
             values = self.table.item(item)['values']
-            wav_name = values[2]
-            wav_path = None
-            for root, dirs, files in os.walk(self.out_dir.get()):
-                if wav_name in files:
-                    wav_path = os.path.join(root, wav_name)
-                    break
-            if wav_path:
+            fname = values[2]
+            start = float(values[3])
+            end = float(values[4])
+            wav_name = values[5]
+            wav_dir = Path(self.wav_dir.get())
+            wav_path = wav_dir / wav_name
+            if wav_path.exists():
                 try:
-                    print(f"連続再生: {wav_path}")
-                    audio = AudioSegment.from_file(wav_path)
-                    samples = np.array(audio.get_array_of_samples())
-                    if audio.channels == 2:
+                    print(f"連続プレビュー再生: {wav_path} {start}-{end}")
+                    audio = AudioSegment.from_file(str(wav_path))
+                    preview = audio[int(start*1000):int(end*1000)]
+                    samples = np.array(preview.get_array_of_samples())
+                    if preview.channels == 2:
                         samples = samples.reshape((-1, 2))
-                    max_val = float(2 ** (8 * audio.sample_width - 1))
+                    max_val = float(2 ** (8 * preview.sample_width - 1))
                     samples = samples.astype(np.float32) / max_val
-                    sd.play(samples, audio.frame_rate)
+                    sd.play(samples, preview.frame_rate)
                     sd.wait()
                 except Exception as e:
-                    print(f'連続再生エラー: {e}')
-                    messagebox.showerror('エラー', f'音声の再生中にエラーが発生しました：\n{str(e)}')
+                    print(f'連続プレビュー再生エラー: {e}')
+                    messagebox.showerror('エラー', f'連続プレビュー再生中にエラーが発生しました：\n{str(e)}')
             current_index += 1
             if current_index < len(self.table.get_children()):
                 self.table.selection_set(self.table.get_children()[current_index])
@@ -347,24 +338,6 @@ class App(tk.Tk):
         self.is_playing = False
         self.continuous_play = False
         sd.stop()
-
-    def _play_audio(self):
-        self.is_playing = True
-        try:
-            print(f"再生ファイル: {self.current_audio_path}")
-            audio = AudioSegment.from_file(self.current_audio_path)
-            samples = np.array(audio.get_array_of_samples())
-            if audio.channels == 2:
-                samples = samples.reshape((-1, 2))
-            max_val = float(2 ** (8 * audio.sample_width - 1))
-            samples = samples.astype(np.float32) / max_val
-            sd.play(samples, audio.frame_rate)
-            sd.wait()
-        except Exception as e:
-            print(f'再生エラー: {e}')
-            messagebox.showerror('エラー', f'音声の再生中にエラーが発生しました：\n{str(e)}')
-        finally:
-            self.is_playing = False
 
     def on_select(self, event):
         if self.is_playing:
@@ -549,6 +522,30 @@ class App(tk.Tk):
             messagebox.showinfo('完了', 'プロジェクトの読み込みが完了しました')
         except Exception as e:
             messagebox.showerror('エラー', f'プロジェクトの読み込み中にエラーが発生しました：\n{str(e)}')
+
+    def export_wav_files(self):
+        if not self.table.get_children():
+            messagebox.showinfo('情報', '出力するデータがありません')
+            return
+        out_dir = self.out_dir.get() or (str(Path.cwd() / 'output'))
+        Path(out_dir).mkdir(exist_ok=True)
+        wav_dir = Path(self.wav_dir.get())
+        for item in self.table.get_children():
+            values = self.table.item(item)['values']
+            fname = values[2]
+            start = float(values[3])
+            end = float(values[4])
+            wav_name = values[5]
+            wav_path = wav_dir / wav_name
+            if not wav_path.exists():
+                print(f'元WAVファイルが見つかりません: {wav_name}')
+                continue
+            audio = AudioSegment.from_file(str(wav_path))
+            clip = audio[int(start*1000):int(end*1000)]
+            out_path = Path(out_dir) / fname
+            clip.export(out_path, format='wav')
+            print(f'書き出し: {out_path}')
+        messagebox.showinfo('完了', 'WAVファイルの出力が完了しました')
 
 
 if __name__ == '__main__':
