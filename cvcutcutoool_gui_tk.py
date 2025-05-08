@@ -20,6 +20,7 @@ import time
 import sounddevice as sd
 import numpy as np
 from PIL import Image, ImageTk
+import queue
 
 
 class App(tk.Tk):
@@ -117,18 +118,27 @@ class App(tk.Tk):
         self.export_wav_button.grid(row=15, column=0, columnspan=3, pady=10)
 
         # --- ここから下にコントロールボタンを縦に配置 ---
-        self.play_button = tk.Button(frm, text='再生', command=self.play_selected, width=22, bg=tex_color)
+        self.play_button = tk.Button(frm, text='再生 (S)', command=self.play_selected, width=22)
         self.play_button.grid(row=11, column=0, columnspan=3, pady=2)
-        self.continuous_play_button = tk.Button(frm, text='連続再生', command=self.play_continuous, width=22, bg=tex_color)
+        self.continuous_play_button = tk.Button(frm, text='連続再生 (R)', command=self.play_continuous, width=22)
         self.continuous_play_button.grid(row=12, column=0, columnspan=3, pady=2)
-        self.stop_button = tk.Button(frm, text='停止', command=self.stop_playback, width=22, bg=tex_color)
+        self.stop_button = tk.Button(frm, text='停止 (0)', command=self.stop_playback, width=22)
         self.stop_button.grid(row=13, column=0, columnspan=3, pady=2)
-        self.csv_button = tk.Button(frm, text='CSV出力', command=self.export_csv, width=22, bg=tex_color)
-        self.csv_button.grid(row=14, column=0, columnspan=3, pady=10)
-
-        # 除外ボタンを追加
-        self.exclude_button = tk.Button(frm, text='除外', width=22, command=self.exclude_selected, bg=tex_color)
-        self.exclude_button.grid(row=16, column=0, columnspan=3, pady=2)
+        self.exclude_button = tk.Button(frm, text='除外 (X)', width=22, command=self.exclude_selected)
+        self.exclude_button.grid(row=14, column=0, columnspan=3, pady=2)
+        # プレビューボタン（青）
+        self.preview_button = tk.Button(frm, text='プレビュー', bg='royalblue', fg='white', width=22, command=self.preview)
+        self.preview_button.grid(row=15, column=0, columnspan=3, pady=10)
+        # オールクリアボタン（赤）
+        self.clear_button = tk.Button(frm, text='オールクリア', width=22, command=self.all_clear, bg='red', fg='white')
+        self.clear_button.grid(row=16, column=0, columnspan=3, pady=2)
+        # CSV/WAV出力ボタンを最下段に左右並びで配置
+        bottom_frame = tk.Frame(frm, bg=tex_color)
+        bottom_frame.grid(row=17, column=0, columnspan=3, pady=10, sticky='ew')
+        self.csv_button = tk.Button(bottom_frame, text='CSV出力', command=self.export_csv, width=10)
+        self.csv_button.pack(side=tk.LEFT, padx=5)
+        self.export_wav_button = tk.Button(bottom_frame, text='WAV出力', command=self.export_wav_files, width=10)
+        self.export_wav_button.pack(side=tk.RIGHT, padx=5)
 
         # ---------- 右ペイン：結果テーブル ----------
         cols = ('No', '台詞', '出力wav名', '開始', '終了', '元WAV')
@@ -179,6 +189,26 @@ class App(tk.Tk):
         self.bind('x', self.on_x_key)
         self.bind('k', self.on_k_key)
 
+        # プレビュー用キューとスレッド管理
+        self.preview_queue = queue.Queue()
+        self.preview_thread = None
+        self.after(100, self.process_preview_queue)
+
+        # 各入力欄・ボタンの参照を保存
+        self.cv_path_entry = frm.children[list(frm.children)[1]]
+        self.cv_path_btn = frm.children[list(frm.children)[2]]
+        self.sheet_entry = frm.children[list(frm.children)[4]]
+        self.no_col_entry = frm.children[list(frm.children)[6]]
+        self.text_col_entry = frm.children[list(frm.children)[8]]
+        self.wav_dir_entry = frm.children[list(frm.children)[10]]
+        self.wav_dir_btn = frm.children[list(frm.children)[11]]
+        self.start_row_entry = frm.children[list(frm.children)[13]]
+        self.prefix_entry = frm.children[list(frm.children)[15]]
+        self.out_dir_entry = frm.children[list(frm.children)[17]]
+        self.out_dir_btn = frm.children[list(frm.children)[18]]
+        self.threshold_scale = frm.children[list(frm.children)[19]]
+        self.volume_thresh_scale = frm.children[list(frm.children)[20]]
+
     # ダイアログ: ファイル/フォルダ選択
     def browse_cv(self):
         p = filedialog.askopenfilename(filetypes=[('Excel', '*.xlsx')])
@@ -197,10 +227,11 @@ class App(tk.Tk):
 
     # プレビュートリガー
     def preview(self):
+        # プレビュー後は左ペインの入力欄・参照ボタンを無効化
+        self.set_left_controls_state('disabled')
         if not self.cv_path.get() or not self.wav_dir.get():
             messagebox.showerror('エラー', 'CVリストとwavフォルダを指定してください')
             return
-        # 進行中インジケーター（中央表示）
         self.config(cursor='watch')
         if not hasattr(self, 'progress_label'):
             self.progress_label = tk.Label(self, text='処理中...', fg='red', font=('Arial', 20), bg='#fff')
@@ -209,11 +240,12 @@ class App(tk.Tk):
             self.progress_label.config(text='処理中...')
             self.progress_label.place(relx=0.5, rely=0.5, anchor='center')
         self.update()
-        threading.Thread(target=self.process_preview, daemon=True).start()
-
-    # プレビュー用メイン処理（ファイルは出力しない）
-    def process_preview(self):
         self.table.delete(*self.table.get_children())
+        # スレッドで1ファイルずつ処理
+        self.preview_thread = threading.Thread(target=self.process_preview_async, daemon=True)
+        self.preview_thread.start()
+
+    def process_preview_async(self):
         scripts = load_script_list(
             Path(self.cv_path.get()),
             sheet_name=self.sheet.get(),
@@ -243,9 +275,6 @@ class App(tk.Tk):
                     }
                     segments.append(seg_abs)
                 tmp_chunk_path.unlink()
-            print(f"[DEBUG] segments for {wav.name}")
-            for seg in segments:
-                print(f"  {seg['start']:.2f}-{seg['end']:.2f}: {seg['text']}")
             vol_th = self.volume_thresh.get()
             filtered = []
             audio = AudioSegment.from_file(wav)
@@ -268,24 +297,44 @@ class App(tk.Tk):
                         mis_count_dict[num] = mis_count_dict.get(num, 0) + 1
                         ver = count_dict.get(num, 0) + 1
                         mis_ver = mis_count_dict[num]
-                        fname = f"{self.prefix.get()}{num:03d}_{ver:02d}_mis{mis_ver:02d}.wav"
+                        fname = f"{self.prefix.get()}{num}_{ver}_mis{mis_ver}.wav"
                     else:
                         count_dict[num] = count_dict.get(num, 0) + 1
                         ver = count_dict[num]
-                        fname = f"{self.prefix.get()}{num:03d}_{ver:02d}.wav"
-                    if not m.get('is_mis'):
-                        text_disp = scripts[[s['no'] for s in scripts].index(f"{num:03d}")]['text'].rstrip('。')
+                        fname = f"{self.prefix.get()}{num}_{ver}.wav"
+                    # No比較はstr(int(...))で統一
+                    script_no_list = []
+                    for s in scripts:
+                        try:
+                            script_no_list.append(str(int(s['no'])))
+                        except Exception:
+                            script_no_list.append(str(s['no']))
+                    num_str = str(int(num)) if str(num).isdigit() else str(num)
+                    if num_str in script_no_list:
+                        text_disp = scripts[script_no_list.index(num_str)]['text'].rstrip('。')
                     else:
+                        print(f'[WARN] No {num_str} not found in script_no_list: {script_no_list}')
                         text_disp = m['text'].rstrip('。')
                     no_disp = f"{num}(mis)" if m.get('is_mis') else num
-                # 表に「No, 台詞, 仮ファイル名, 開始, 終了, 元WAV」を表示
-                self.table.insert('', tk.END, values=(no_disp, text_disp, fname, m['start'], m['end'], wav_name))
-        messagebox.showinfo('完了', 'プレビューが完了しました')
-        self.config(cursor='')
-        if hasattr(self, 'progress_label'):
-            self.progress_label.config(text='')
-            self.progress_label.place_forget()
-        self.update()
+                self.preview_queue.put((no_disp, text_disp, fname, m['start'], m['end'], wav_name))
+        self.preview_queue.put('DONE')
+
+    def process_preview_queue(self):
+        try:
+            while not self.preview_queue.empty():
+                item = self.preview_queue.get_nowait()
+                if item == 'DONE':
+                    self.config(cursor='')
+                    if hasattr(self, 'progress_label'):
+                        self.progress_label.config(text='')
+                        self.progress_label.place_forget()
+                    self.update()
+                    return
+                self.table.insert('', tk.END, values=item)
+        except Exception as e:
+            print(f'プレビューキュー処理エラー: {e}')
+        finally:
+            self.after(100, self.process_preview_queue)
 
     def play_selected(self):
         selected_items = self.table.selection()
@@ -419,13 +468,29 @@ class App(tk.Tk):
         values = list(self.table.item(self.edit_item)['values'])
         # No列を編集した場合は出力wav名も自動更新
         if self.edit_column == 0:
+            old_no = str(values[0])
+            new_no = str(int(new_value)) if str(new_value).isdigit() else new_value
+            # 既存Noグループのバージョン最大値を計算
+            all_items = self.table.get_children()
+            ver = 1
+            for item in all_items:
+                v = self.table.item(item)['values']
+                if str(v[0]) == new_no and item != self.edit_item:
+                    fname = v[2]
+                    try:
+                        ver_num = int(fname.split('_')[-1].split('.')[0])
+                        if ver_num >= ver:
+                            ver = ver_num + 1
+                    except Exception:
+                        continue
+            # ファイル名を新No＋新バージョンで生成
             old_fname = values[2]
             parts = old_fname.split('_')
             if len(parts) >= 3:
-                # 例: Vol2_20_01.wav
-                parts[1] = str(int(new_value)) if str(new_value).isdigit() else str(new_value)
+                parts[1] = new_no
+                parts[-1] = f'{ver}.wav'
                 values[2] = '_'.join(parts)
-            values[self.edit_column] = str(int(new_value)) if str(new_value).isdigit() else new_value
+            values[self.edit_column] = new_no
         # 台詞欄を編集した場合は最も近いNoに自動変換し、ファイル名も自動更新
         elif self.edit_column == 1:
             scripts = load_script_list(
@@ -443,12 +508,30 @@ class App(tk.Tk):
                     best_score = score
                     best_no = s['no']
             if best_no is not None:
-                values[0] = str(int(best_no)) if str(best_no).isdigit() else best_no
+                # mis解除時はファイル名からmisを除去し、Noグループの最大値＋1を割り当て
+                new_no = str(int(best_no)) if str(best_no).isdigit() else best_no
+                all_items = self.table.get_children()
+                ver = 1
+                for item in all_items:
+                    v = self.table.item(item)['values']
+                    if str(v[0]) == new_no and item != self.edit_item:
+                        fname = v[2]
+                        try:
+                            ver_num = int(fname.split('_')[-1].split('.')[0])
+                            if ver_num >= ver:
+                                ver = ver_num + 1
+                        except Exception:
+                            continue
                 old_fname = values[2]
                 parts = old_fname.split('_')
-                if len(parts) >= 3:
-                    parts[1] = str(int(best_no)) if str(best_no).isdigit() else str(best_no)
-                    values[2] = '_'.join(parts)
+                # mis解除時はmisを除去
+                if 'mis' in parts[-1]:
+                    parts = parts[:-1] + [f'{ver}.wav']
+                else:
+                    parts[1] = new_no
+                    parts[-1] = f'{ver}.wav'
+                values[2] = '_'.join(parts)
+                values[0] = new_no
         values[self.edit_column] = new_value
         self.table.item(self.edit_item, values=values)
         self.edit_entry.destroy()
@@ -618,7 +701,7 @@ class App(tk.Tk):
         self.mark_ok_take()
 
     def mark_ok_take(self):
-        selected_items = self.table.selection()
+        selNoected_items = self.table.selection()
         for item in selected_items:
             tags = self.table.item(item, 'tags')
             if isinstance(tags, str):
@@ -628,6 +711,20 @@ class App(tk.Tk):
             else:
                 self.table.item(item, tags=tuple(tags) + ('oktake',))
         self.table.tag_configure('oktake', background='#fff2b2')  # 薄い黄色
+
+    def set_left_controls_state(self, state):
+        # CVリスト～出力先フォルダまでの入力欄・参照ボタンを有効/無効化
+        for widget in [self.cv_path_entry, self.cv_path_btn, self.sheet_entry, self.no_col_entry, self.text_col_entry,
+                       self.wav_dir_entry, self.wav_dir_btn, self.start_row_entry, self.prefix_entry, self.out_dir_entry, self.out_dir_btn]:
+            widget.config(state=state)
+        self.threshold_scale.config(state=state)
+        self.volume_thresh_scale.config(state=state)
+
+    def all_clear(self):
+        if not messagebox.askyesno('確認', '本当に全消去してよろしいですか？'):
+            return
+        self.table.delete(*self.table.get_children())
+        self.set_left_controls_state('normal')
 
 
 if __name__ == '__main__':
