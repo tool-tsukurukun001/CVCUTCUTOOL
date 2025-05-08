@@ -19,6 +19,7 @@ import wave
 import time
 import sounddevice as sd
 import numpy as np
+from PIL import Image, ImageTk
 
 
 class App(tk.Tk):
@@ -32,8 +33,22 @@ class App(tk.Tk):
         self.is_playing = False
         self.play_thread = None
 
+        # 背景テクスチャ
+        try:
+            self.bg_img = Image.open('texture.png')
+            self.bg_img = self.bg_img.resize((1050, 650))
+            self.bg_photo = ImageTk.PhotoImage(self.bg_img)
+            self.bg_label = tk.Label(self, image=self.bg_photo)
+            self.bg_label.place(x=0, y=0, relwidth=1, relheight=1)
+            self.bg_label.lower()
+        except Exception as e:
+            print(f'背景テクスチャ読み込み失敗: {e}')
+
+        # テクスチャに近い色
+        tex_color = '#f5f5f5'
+
         # ---------- 左ペイン ----------
-        frm = tk.Frame(self)
+        frm = tk.Frame(self, bg=tex_color)
         frm.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
 
         # CVリスト (Excel)
@@ -78,14 +93,14 @@ class App(tk.Tk):
         tk.Button(frm, text='参照', command=self.browse_out).grid(row=7, column=2)
 
         # スクリプト照合しきい値
-        self.threshold = tk.IntVar(value=80)
+        self.threshold = tk.IntVar(value=50)  # デフォルト50
         tk.Scale(
             frm, from_=0, to=100, orient='horizontal', variable=self.threshold,
             label='しきい値 (ゆるい 0〜100 きびしい)', length=250
         ).grid(row=8, column=0, columnspan=3, pady=5)
 
         # 音量しきい値 (dBFS)
-        self.volume_thresh = tk.IntVar(value=-40)
+        self.volume_thresh = tk.IntVar(value=-50)  # デフォルト-50
         tk.Scale(
             frm, from_=-60, to=0, orient='horizontal', variable=self.volume_thresh,
             label='音量しきい値 (dBFS)', length=250
@@ -102,22 +117,35 @@ class App(tk.Tk):
         self.export_wav_button.grid(row=15, column=0, columnspan=3, pady=10)
 
         # --- ここから下にコントロールボタンを縦に配置 ---
-        self.play_button = tk.Button(frm, text='再生', command=self.play_selected, width=22)
+        self.play_button = tk.Button(frm, text='再生', command=self.play_selected, width=22, bg=tex_color)
         self.play_button.grid(row=11, column=0, columnspan=3, pady=2)
-        self.continuous_play_button = tk.Button(frm, text='連続再生', command=self.play_continuous, width=22)
+        self.continuous_play_button = tk.Button(frm, text='連続再生', command=self.play_continuous, width=22, bg=tex_color)
         self.continuous_play_button.grid(row=12, column=0, columnspan=3, pady=2)
-        self.stop_button = tk.Button(frm, text='停止', command=self.stop_playback, width=22)
+        self.stop_button = tk.Button(frm, text='停止', command=self.stop_playback, width=22, bg=tex_color)
         self.stop_button.grid(row=13, column=0, columnspan=3, pady=2)
-        self.csv_button = tk.Button(frm, text='CSV出力', command=self.export_csv, width=22)
+        self.csv_button = tk.Button(frm, text='CSV出力', command=self.export_csv, width=22, bg=tex_color)
         self.csv_button.grid(row=14, column=0, columnspan=3, pady=10)
+
+        # 除外ボタンを追加
+        self.exclude_button = tk.Button(frm, text='除外', width=22, command=self.exclude_selected, bg=tex_color)
+        self.exclude_button.grid(row=16, column=0, columnspan=3, pady=2)
 
         # ---------- 右ペイン：結果テーブル ----------
         cols = ('No', '台詞', '出力wav名', '開始', '終了', '元WAV')
-        self.table = ttk.Treeview(self, columns=cols, show='headings', height=28)
+        table_frame = tk.Frame(self, bg=tex_color)
+        table_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=10, pady=10)
+        style = ttk.Style()
+        style.configure('Treeview', background=tex_color, fieldbackground=tex_color)
+        self.table = ttk.Treeview(table_frame, columns=cols, show='headings', height=28, style='Treeview')
         for c in cols:
             self.table.heading(c, text=c)
             self.table.column(c, width=180 if c == '台詞' else 100, anchor='w')
-        self.table.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=10, pady=10)
+        vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.table.yview)
+        self.table.configure(yscrollcommand=vsb.set)
+        self.table.grid(row=0, column=0, sticky='nsew')
+        vsb.grid(row=0, column=1, sticky='ns')
+        table_frame.grid_rowconfigure(0, weight=1)
+        table_frame.grid_columnconfigure(0, weight=1)
 
         # テーブルの選択イベントをバインド
         self.table.bind('<<TreeviewSelect>>', self.on_select)
@@ -139,6 +167,17 @@ class App(tk.Tk):
         file_menu.add_command(label='プロジェクトを開く', command=self.load_project)
         file_menu.add_separator()
         file_menu.add_command(label='終了', command=self.quit)
+        file_menu.add_command(label='OKテイクにマーキング', command=self.mark_ok_take)
+
+        # 除外フラグ用の辞書
+        self.excluded_items = set()
+
+        # ショートカットキーのバインド
+        self.bind('s', self.on_s_key)
+        self.bind('r', self.on_r_key)
+        self.bind('0', self.on_0_key)
+        self.bind('x', self.on_x_key)
+        self.bind('k', self.on_k_key)
 
     # ダイアログ: ファイル/フォルダ選択
     def browse_cv(self):
@@ -161,13 +200,14 @@ class App(tk.Tk):
         if not self.cv_path.get() or not self.wav_dir.get():
             messagebox.showerror('エラー', 'CVリストとwavフォルダを指定してください')
             return
-        # 進行中インジケーター
+        # 進行中インジケーター（中央表示）
         self.config(cursor='watch')
         if not hasattr(self, 'progress_label'):
-            self.progress_label = tk.Label(self, text='処理中...', fg='red', font=('Arial', 16))
-            self.progress_label.pack(side=tk.TOP, pady=5)
+            self.progress_label = tk.Label(self, text='処理中...', fg='red', font=('Arial', 20), bg='#fff')
+            self.progress_label.place(relx=0.5, rely=0.5, anchor='center')
         else:
             self.progress_label.config(text='処理中...')
+            self.progress_label.place(relx=0.5, rely=0.5, anchor='center')
         self.update()
         threading.Thread(target=self.process_preview, daemon=True).start()
 
@@ -244,6 +284,7 @@ class App(tk.Tk):
         self.config(cursor='')
         if hasattr(self, 'progress_label'):
             self.progress_label.config(text='')
+            self.progress_label.place_forget()
         self.update()
 
     def play_selected(self):
@@ -344,48 +385,29 @@ class App(tk.Tk):
             self.stop_playback()
 
     def on_double_click(self, event):
-        # クリックされた領域を取得
         region = self.table.identify_region(event.x, event.y)
         if region != "cell":
             return
-            
-        # クリックされた項目と列を取得
         column = self.table.identify_column(event.x)
         item = self.table.identify_row(event.y)
-        
         if not item or not column:
             return
-            
-        # 列番号を取得
         column_num = int(column[1]) - 1
-        
-        # 編集可能な列かチェック
-        if column_num not in [0, 1]:  # No列と台詞列のみ編集可能
+        # 編集可能な列: No, 台詞, 出力wav名, 開始, 終了
+        if column_num not in [0, 1, 2, 3, 4]:
             return
-            
-        # 既存の編集をキャンセル
         if self.edit_entry:
             self.edit_entry.destroy()
-            
-        # 項目の値を取得
         values = self.table.item(item)['values']
         current_value = values[column_num]
-        
-        # 編集用のエントリーを作成
         x, y, width, height = self.table.bbox(item, column)
-        
         self.edit_entry = tk.Entry(self.table, width=width//10)
         self.edit_entry.insert(0, current_value)
         self.edit_entry.select_range(0, tk.END)
         self.edit_entry.place(x=x, y=y, width=width, height=height)
-        
         self.edit_item = item
         self.edit_column = column_num
-        
-        # フォーカスを設定
         self.edit_entry.focus_set()
-        
-        # 編集完了時のイベントをバインド
         self.edit_entry.bind('<Return>', self.on_edit_complete)
         self.edit_entry.bind('<Escape>', self.on_edit_cancel)
         self.edit_entry.bind('<FocusOut>', self.on_edit_complete)
@@ -393,18 +415,42 @@ class App(tk.Tk):
     def on_edit_complete(self, event):
         if not self.edit_entry:
             return
-            
-        # 新しい値を取得
         new_value = self.edit_entry.get()
-        
-        # 現在の値を取得
         values = list(self.table.item(self.edit_item)['values'])
-        
-        # 値を更新
+        # No列を編集した場合は出力wav名も自動更新
+        if self.edit_column == 0:
+            old_fname = values[2]
+            parts = old_fname.split('_')
+            if len(parts) >= 3:
+                # 例: Vol2_20_01.wav
+                parts[1] = str(int(new_value)) if str(new_value).isdigit() else str(new_value)
+                values[2] = '_'.join(parts)
+            values[self.edit_column] = str(int(new_value)) if str(new_value).isdigit() else new_value
+        # 台詞欄を編集した場合は最も近いNoに自動変換し、ファイル名も自動更新
+        elif self.edit_column == 1:
+            scripts = load_script_list(
+                Path(self.cv_path.get()),
+                sheet_name=self.sheet.get(),
+                start_row=int(self.start_row.get() or 2),
+                no_col=self.no_col.get(),
+                text_col=self.text_col.get()
+            )
+            best_score = -1
+            best_no = None
+            for s in scripts:
+                score = fuzz.ratio(new_value, s['text'])
+                if score > best_score:
+                    best_score = score
+                    best_no = s['no']
+            if best_no is not None:
+                values[0] = str(int(best_no)) if str(best_no).isdigit() else best_no
+                old_fname = values[2]
+                parts = old_fname.split('_')
+                if len(parts) >= 3:
+                    parts[1] = str(int(best_no)) if str(best_no).isdigit() else str(best_no)
+                    values[2] = '_'.join(parts)
         values[self.edit_column] = new_value
         self.table.item(self.edit_item, values=values)
-        
-        # 編集用エントリーを削除
         self.edit_entry.destroy()
         self.edit_entry = None
         self.edit_item = None
@@ -421,28 +467,24 @@ class App(tk.Tk):
         if not self.table.get_children():
             messagebox.showinfo('情報', '出力するデータがありません')
             return
-            
-        # 保存先を選択
         file_path = filedialog.asksaveasfilename(
             defaultextension='.csv',
             filetypes=[('CSVファイル', '*.csv')],
             title='CSVファイルの保存'
         )
-        
         if not file_path:
             return
-            
         try:
             with open(file_path, 'w', newline='', encoding='utf-8-sig') as f:
                 writer = csv.writer(f)
                 # ヘッダーを書き込み
-                writer.writerow(['No', '台詞', '出力wav名'])
-                
+                writer.writerow(['No', '台詞', '出力wav名', '開始', '終了', '元WAV', 'OKテイク'])
                 # データを書き込み
                 for item in self.table.get_children():
                     values = self.table.item(item)['values']
-                    writer.writerow(values)
-                    
+                    tags = self.table.item(item, 'tags')
+                    ok_flag = 'OK' if 'oktake' in tags else ''
+                    writer.writerow(list(values) + [ok_flag])
             messagebox.showinfo('完了', 'CSVファイルの出力が完了しました')
         except Exception as e:
             messagebox.showerror('エラー', f'CSVファイルの出力中にエラーが発生しました：\n{str(e)}')
@@ -531,6 +573,8 @@ class App(tk.Tk):
         Path(out_dir).mkdir(exist_ok=True)
         wav_dir = Path(self.wav_dir.get())
         for item in self.table.get_children():
+            if item in self.excluded_items:
+                continue  # 除外行はスキップ
             values = self.table.item(item)['values']
             fname = values[2]
             start = float(values[3])
@@ -546,6 +590,44 @@ class App(tk.Tk):
             clip.export(out_path, format='wav')
             print(f'書き出し: {out_path}')
         messagebox.showinfo('完了', 'WAVファイルの出力が完了しました')
+
+    def exclude_selected(self):
+        selected_items = self.table.selection()
+        for item in selected_items:
+            if item not in self.excluded_items:
+                self.table.item(item, tags=('excluded',))
+                self.excluded_items.add(item)
+            else:
+                self.table.item(item, tags=())
+                self.excluded_items.remove(item)
+        self.table.tag_configure('excluded', background='#cccccc')
+
+    def on_s_key(self, event):
+        self.play_selected()
+
+    def on_r_key(self, event):
+        self.play_continuous()
+
+    def on_0_key(self, event):
+        self.stop_playback()
+
+    def on_x_key(self, event):
+        self.exclude_selected()
+
+    def on_k_key(self, event):
+        self.mark_ok_take()
+
+    def mark_ok_take(self):
+        selected_items = self.table.selection()
+        for item in selected_items:
+            tags = self.table.item(item, 'tags')
+            if isinstance(tags, str):
+                tags = (tags,)
+            if 'oktake' in tags:
+                self.table.item(item, tags=tuple(t for t in tags if t != 'oktake'))
+            else:
+                self.table.item(item, tags=tuple(tags) + ('oktake',))
+        self.table.tag_configure('oktake', background='#fff2b2')  # 薄い黄色
 
 
 if __name__ == '__main__':
