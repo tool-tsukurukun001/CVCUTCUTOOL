@@ -100,11 +100,11 @@ class App(tk.Tk):
             label='しきい値 (ゆるい 0〜100 きびしい)', length=250
         ).grid(row=8, column=0, columnspan=3, pady=5)
 
-        # 音量しきい値 (dBFS)
-        self.volume_thresh = tk.IntVar(value=-50)  # デフォルト-50
+        # エンベロープ検出の閾値
+        self.envelope_thresh = tk.DoubleVar(value=0.1)  # デフォルト0.1
         tk.Scale(
-            frm, from_=-60, to=0, orient='horizontal', variable=self.volume_thresh,
-            label='音量しきい値 (dBFS)', length=250
+            frm, from_=0.0, to=0.5, orient='horizontal', variable=self.envelope_thresh,
+            label='エンベロープ検出閾値 (0.0-0.5)', length=250, resolution=0.01
         ).grid(row=9, column=0, columnspan=3, pady=5)
 
         # プレビュー（旧WAV出力）ボタン
@@ -115,26 +115,26 @@ class App(tk.Tk):
 
         # WAV出力ボタン（プレビューの下に追加）
         self.export_wav_button = tk.Button(frm, text='WAV出力', bg='green', fg='white', width=22, command=self.export_wav_files)
-        self.export_wav_button.grid(row=15, column=0, columnspan=3, pady=10)
+        self.export_wav_button.grid(row=11, column=0, columnspan=3, pady=10)
 
         # --- ここから下にコントロールボタンを縦に配置 ---
         self.play_button = tk.Button(frm, text='再生 (S)', command=self.play_selected, width=22)
-        self.play_button.grid(row=11, column=0, columnspan=3, pady=2)
+        self.play_button.grid(row=12, column=0, columnspan=3, pady=2)
         self.continuous_play_button = tk.Button(frm, text='連続再生 (R)', command=self.play_continuous, width=22)
-        self.continuous_play_button.grid(row=12, column=0, columnspan=3, pady=2)
+        self.continuous_play_button.grid(row=13, column=0, columnspan=3, pady=2)
         self.stop_button = tk.Button(frm, text='停止 (0)', command=self.stop_playback, width=22)
-        self.stop_button.grid(row=13, column=0, columnspan=3, pady=2)
+        self.stop_button.grid(row=14, column=0, columnspan=3, pady=2)
         self.exclude_button = tk.Button(frm, text='除外 (X)', width=22, command=self.exclude_selected)
-        self.exclude_button.grid(row=14, column=0, columnspan=3, pady=2)
+        self.exclude_button.grid(row=15, column=0, columnspan=3, pady=2)
         # プレビューボタン（青）
         self.preview_button = tk.Button(frm, text='プレビュー', bg='royalblue', fg='white', width=22, command=self.preview)
-        self.preview_button.grid(row=15, column=0, columnspan=3, pady=10)
+        self.preview_button.grid(row=16, column=0, columnspan=3, pady=10)
         # オールクリアボタン（赤）
         self.clear_button = tk.Button(frm, text='オールクリア', width=22, command=self.all_clear, bg='red', fg='white')
-        self.clear_button.grid(row=16, column=0, columnspan=3, pady=2)
+        self.clear_button.grid(row=17, column=0, columnspan=3, pady=2)
         # CSV/WAV出力ボタンを最下段に左右並びで配置
         bottom_frame = tk.Frame(frm, bg=tex_color)
-        bottom_frame.grid(row=17, column=0, columnspan=3, pady=10, sticky='ew')
+        bottom_frame.grid(row=18, column=0, columnspan=3, pady=10, sticky='ew')
         self.csv_button = tk.Button(bottom_frame, text='CSV出力', command=self.export_csv, width=10)
         self.csv_button.pack(side=tk.LEFT, padx=5)
         self.export_wav_button = tk.Button(bottom_frame, text='WAV出力', command=self.export_wav_files, width=10)
@@ -207,7 +207,7 @@ class App(tk.Tk):
         self.out_dir_entry = frm.children[list(frm.children)[17]]
         self.out_dir_btn = frm.children[list(frm.children)[18]]
         self.threshold_scale = frm.children[list(frm.children)[19]]
-        self.volume_thresh_scale = frm.children[list(frm.children)[20]]
+        self.envelope_thresh_scale = frm.children[list(frm.children)[20]]
 
     # ダイアログ: ファイル/フォルダ選択
     def browse_cv(self):
@@ -259,8 +259,10 @@ class App(tk.Tk):
             chunk_segments = split_audio(
                 str(wav),
                 min_silence_len=700,
-                silence_thresh=-40,
-                keep_silence=400
+                silence_thresh=-50,  # 固定値
+                keep_silence=400,
+                envelope_threshold=self.envelope_thresh.get(),
+                crossfade_duration=20  # 固定値
             )
             segments = []
             for idx, chunk in enumerate(chunk_segments, start=1):
@@ -275,7 +277,7 @@ class App(tk.Tk):
                     }
                     segments.append(seg_abs)
                 tmp_chunk_path.unlink()
-            vol_th = self.volume_thresh.get()
+            vol_th = -50  # 固定値
             filtered = []
             audio = AudioSegment.from_file(wav)
             for seg in segments:
@@ -595,7 +597,7 @@ class App(tk.Tk):
                 'prefix': self.prefix.get(),
                 'out_dir': self.out_dir.get(),
                 'threshold': self.threshold.get(),
-                'volume_thresh': self.volume_thresh.get(),
+                'envelope_thresh': self.envelope_thresh.get(),
                 'table_data': []
             }
             
@@ -637,7 +639,7 @@ class App(tk.Tk):
             self.prefix.set(project_data['prefix'])
             self.out_dir.set(project_data['out_dir'])
             self.threshold.set(project_data['threshold'])
-            self.volume_thresh.set(project_data['volume_thresh'])
+            self.envelope_thresh.set(project_data['envelope_thresh'])
             
             # テーブルデータを復元
             self.table.delete(*self.table.get_children())
@@ -701,7 +703,7 @@ class App(tk.Tk):
         self.mark_ok_take()
 
     def mark_ok_take(self):
-        selNoected_items = self.table.selection()
+        selected_items = self.table.selection()
         for item in selected_items:
             tags = self.table.item(item, 'tags')
             if isinstance(tags, str):
@@ -718,7 +720,7 @@ class App(tk.Tk):
                        self.wav_dir_entry, self.wav_dir_btn, self.start_row_entry, self.prefix_entry, self.out_dir_entry, self.out_dir_btn]:
             widget.config(state=state)
         self.threshold_scale.config(state=state)
-        self.volume_thresh_scale.config(state=state)
+        self.envelope_thresh_scale.config(state=state)
 
     def all_clear(self):
         if not messagebox.askyesno('確認', '本当に全消去してよろしいですか？'):
